@@ -2317,6 +2317,7 @@ class DependentsStream(GitHubRestStream):
     parent_stream_type = RepositoryStream
     ignore_parent_replication_key = True
     state_partitioning_keys: ClassVar[list[str]] = ["repo_id"]
+    tolerated_http_errors: ClassVar[list[int]] = [404]
 
     @property
     def url_base(self) -> str:
