@@ -40,6 +40,7 @@ class RepositoryStream(GitHubRestStream):
         next_page_token: Any | None,  # noqa: ANN401
     ) -> dict[str, Any]:
         """Return a dictionary of values to be used in URL parameterization."""
+        self.logger.info(f"context for '{self.name}' stream: {context}")
         assert context is not None, f"Context cannot be empty for '{self.name}' stream."
         params = super().get_url_params(context, next_page_token)
         if "search_query" in context:
@@ -161,13 +162,17 @@ class RepositoryStream(GitHubRestStream):
         This is called before syncing records, we use it to fetch some additional
         context
         """
+        self.logger.info(f"Configuration for '{self.name}' stream: {self.config}")
+        
         if "searches" in self.config:
+            self.logger.info(f"Using searches: {self.config['searches']}")
             return [
                 {"search_name": s["name"], "search_query": s["query"]}
                 for s in self.config["searches"]
             ]
 
         if "repositories" in self.config:
+            self.logger.info(f"Using repositories: {self.config['repositories']}")
             split_repo_names = [s.split("/") for s in self.config["repositories"]]
             augmented_repo_list = []
             # chunk requests to the graphql endpoint to avoid timeouts and other
@@ -186,7 +191,10 @@ class RepositoryStream(GitHubRestStream):
             return augmented_repo_list
 
         if "organizations" in self.config:
+            self.logger.info(f"Using organizations: {self.config['organizations']}")
             return [{"org": org} for org in self.config["organizations"]]
+            
+        self.logger.warning(f"No repositories, organizations, or searches found in config for '{self.name}' stream")
         return None
 
     def get_child_context(self, record: dict, context: dict | None) -> dict:
@@ -210,6 +218,8 @@ class RepositoryStream(GitHubRestStream):
         quota when only syncing a child stream. Without this,
         the API call is sent but data is discarded.
         """
+        self.logger.info(f"get_records called for '{self.name}' stream with context: {context}")
+        
         if (
             not self.selected
             and "skip_parent_streams" in self.config
@@ -219,6 +229,7 @@ class RepositoryStream(GitHubRestStream):
             # build a minimal mock record so that self._sync_records
             # can proceed with child streams
             # the id is fetched in `get_repo_ids` above
+            self.logger.info(f"Skipping API call for '{self.name}' stream and yielding mock record")
             yield {
                 "owner": {
                     "login": context["org"],
@@ -227,6 +238,7 @@ class RepositoryStream(GitHubRestStream):
                 "id": context["repo_id"],
             }
         else:
+            self.logger.info(f"Calling super().get_records for '{self.name}' stream")
             yield from super().get_records(context)
 
     schema = th.PropertiesList(
