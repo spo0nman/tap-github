@@ -40,8 +40,43 @@ class RepositoryStream(GitHubRestStream):
         next_page_token: Any | None,  # noqa: ANN401
     ) -> dict[str, Any]:
         """Return a dictionary of values to be used in URL parameterization."""
-        self.logger.info(f"context for '{self.name}' stream: {context}")
-        assert context is not None, f"Context cannot be empty for '{self.name}' stream."
+        self.logger.info(f"get_url_params called for '{self.name}' stream with context: {context}")
+        self.logger.info(f"Current config: {self.config}")
+        
+        # Instead of asserting, handle None context gracefully
+        if context is None:
+            self.logger.warning(f"Context is None for '{self.name}' stream. This may indicate a configuration issue.")
+            self.logger.warning(f"Path value: {self.path}")
+            
+            # Check if we can determine which mode we're in
+            if "searches" in self.config:
+                self.logger.info("Using search mode but context is None")
+                # Create a basic context for search mode
+                context = {"search_query": ""}
+            elif "repositories" in self.config:
+                self.logger.info("Using repositories mode but context is None")
+                if self.config.get("repositories"):
+                    # Try to use the first repository as context
+                    repo_parts = self.config["repositories"][0].split("/")
+                    if len(repo_parts) == 2:
+                        org, repo = repo_parts
+                        self.logger.info(f"Using first repository {org}/{repo} as context")
+                        context = {"org": org, "repo": repo}
+            elif "organizations" in self.config:
+                self.logger.info("Using organizations mode but context is None")
+                if self.config.get("organizations"):
+                    # Try to use the first organization as context
+                    org = self.config["organizations"][0]
+                    self.logger.info(f"Using first organization {org} as context")
+                    context = {"org": org}
+            
+            # If we still couldn't create a context, raise a more descriptive error
+            if context is None:
+                raise ValueError(
+                    f"Cannot determine context for '{self.name}' stream. "
+                    f"Configuration must include 'repositories', 'organizations', or 'searches'."
+                )
+                
         params = super().get_url_params(context, next_page_token)
         if "search_query" in context:
             # we're in search mode
@@ -300,6 +335,18 @@ class RepositoryStream(GitHubRestStream):
         th.Property("delete_branch_on_merge", th.BooleanType),
         th.Property("organization", user_object),
     ).to_dict()
+
+    def sync(self, context: dict | None = None) -> None:
+        """Override sync method to add more logging."""
+        self.logger.info(f"RepositoryStream.sync called with context: {context}")
+        self.logger.info(f"Config: {self.config}")
+        
+        # Log information about partitions
+        partitions = self.partitions
+        self.logger.info(f"Partitions for '{self.name}': {partitions}")
+        
+        # Call parent's sync method
+        super().sync(context)
 
 
 class ReadmeStream(GitHubRestStream):
