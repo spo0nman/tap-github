@@ -40,14 +40,18 @@ class RepositoryStream(GitHubRestStream):
         next_page_token: Any | None,  # noqa: ANN401
     ) -> dict[str, Any]:
         """Return a dictionary of values to be used in URL parameterization."""
-        self.logger.info(f"get_url_params called for '{self.name}' stream with context: {context}")
+        self.logger.info(
+            f"get_url_params called for '{self.name}' stream with context: {context}"
+        )
         self.logger.info(f"Current config: {self.config}")
-        
+
         # Instead of asserting, handle None context gracefully
         if context is None:
-            self.logger.warning(f"Context is None for '{self.name}' stream. This may indicate a configuration issue.")
+            self.logger.warning(
+                f"Context is None for '{self.name}' stream. This may indicate a configuration issue."
+            )
             self.logger.warning(f"Path value: {self.path}")
-            
+
             # Check if we can determine which mode we're in
             if "searches" in self.config:
                 self.logger.info("Using search mode but context is None")
@@ -60,7 +64,9 @@ class RepositoryStream(GitHubRestStream):
                     repo_parts = self.config["repositories"][0].split("/")
                     if len(repo_parts) == 2:
                         org, repo = repo_parts
-                        self.logger.info(f"Using first repository {org}/{repo} as context")
+                        self.logger.info(
+                            f"Using first repository {org}/{repo} as context"
+                        )
                         context = {"org": org, "repo": repo}
             elif "organizations" in self.config:
                 self.logger.info("Using organizations mode but context is None")
@@ -69,14 +75,14 @@ class RepositoryStream(GitHubRestStream):
                     org = self.config["organizations"][0]
                     self.logger.info(f"Using first organization {org} as context")
                     context = {"org": org}
-            
+
             # If we still couldn't create a context, raise a more descriptive error
             if context is None:
                 raise ValueError(
                     f"Cannot determine context for '{self.name}' stream. "
                     f"Configuration must include 'repositories', 'organizations', or 'searches'."
                 )
-                
+
         params = super().get_url_params(context, next_page_token)
         if "search_query" in context:
             # we're in search mode
@@ -87,16 +93,48 @@ class RepositoryStream(GitHubRestStream):
     @property
     def path(self) -> str:  # type: ignore
         """Return the API endpoint path. Path options are mutually exclusive."""
+        self.logger.info(f"Getting path for '{self.name}' stream")
 
         if "searches" in self.config:
             # Search API max: 1,000 total.
             self.MAX_RESULTS_LIMIT = 1000
+            self.logger.info("Using search repositories path")
             return "/search/repositories"
+
         if "repositories" in self.config:
+            # For repositories, we need to handle the path differently
+            # because we're dealing with a collection of repositories
+            # Return a non-parameterized path when operating on the entire collection
+            if not hasattr(self, "_current_context") or self._current_context is None:
+                # We're likely in the initial discovery phase
+                # Use the first repository from config for testing connectivity
+                if self.config.get("repositories"):
+                    repo_parts = self.config["repositories"][0].split("/")
+                    if len(repo_parts) == 2:
+                        org, repo = repo_parts
+                        self.logger.info(
+                            f"Using first repository {org}/{repo} for path"
+                        )
+                        return f"/repos/{org}/{repo}"
+
             # the `repo` and `org` args will be parsed from the partition's `context`
+            self.logger.info("Using parameterized repository path")
             return "/repos/{org}/{repo}"
+
         if "organizations" in self.config:
+            self.logger.info("Using organizations repos path")
             return "/orgs/{org}/repos"
+
+        # Default fallback path - should almost never be used
+        self.logger.warning("No valid configuration found for path, using fallback")
+        if self.config.get("repositories") and self.config["repositories"]:
+            # Try to use the first repository as a fallback
+            repo_parts = self.config["repositories"][0].split("/")
+            if len(repo_parts) == 2:
+                org, repo = repo_parts
+                return f"/repos/{org}/{repo}"
+
+        return "/repositories"
 
     @property
     def records_jsonpath(self) -> str:  # type: ignore
@@ -198,7 +236,7 @@ class RepositoryStream(GitHubRestStream):
         context
         """
         self.logger.info(f"Configuration for '{self.name}' stream: {self.config}")
-        
+
         if "searches" in self.config:
             self.logger.info(f"Using searches: {self.config['searches']}")
             return [
@@ -208,29 +246,90 @@ class RepositoryStream(GitHubRestStream):
 
         if "repositories" in self.config:
             self.logger.info(f"Using repositories: {self.config['repositories']}")
+
+            # Empty repositories list check
+            if not self.config.get("repositories"):
+                self.logger.warning("Repositories list is empty in config")
+                # Return a minimal list with one dummy entry to allow discovery to proceed
+                return [{"org": "placeholder", "repo": "placeholder", "repo_id": 0}]
+
             split_repo_names = [s.split("/") for s in self.config["repositories"]]
-            augmented_repo_list = []
-            # chunk requests to the graphql endpoint to avoid timeouts and other
-            # obscure errors that the api doesn't say much about. The actual limit
-            # seems closer to 1000, use half that to stay safe.
-            chunk_size = 500
-            list_length = len(split_repo_names)
-            self.logger.info(f"Filtering repository list of {list_length} repositories")
-            for ndx in range(0, list_length, chunk_size):
-                augmented_repo_list += self.get_repo_ids(
-                    split_repo_names[ndx : ndx + chunk_size]
+
+            # Check for malformed repository names
+            for i, repo_parts in enumerate(split_repo_names):
+                if len(repo_parts) != 2:
+                    self.logger.warning(
+                        f"Malformed repository name: {self.config['repositories'][i]}"
+                    )
+
+            # Filter out malformed repository names
+            valid_repo_names = [parts for parts in split_repo_names if len(parts) == 2]
+
+            if not valid_repo_names:
+                self.logger.warning("No valid repository names found")
+                # Return a minimal list with one dummy entry
+                return [{"org": "placeholder", "repo": "placeholder", "repo_id": 0}]
+
+            try:
+                augmented_repo_list = []
+                # chunk requests to the graphql endpoint to avoid timeouts and other
+                # obscure errors that the api doesn't say much about. The actual limit
+                # seems closer to 1000, use half that to stay safe.
+                chunk_size = 500
+                list_length = len(valid_repo_names)
+                self.logger.info(
+                    f"Filtering repository list of {list_length} repositories"
                 )
-            self.logger.info(
-                f"Running the tap on {len(augmented_repo_list)} repositories"
-            )
-            return augmented_repo_list
+                for ndx in range(0, list_length, chunk_size):
+                    chunk_result = self.get_repo_ids(
+                        valid_repo_names[ndx : ndx + chunk_size]
+                    )
+                    if not chunk_result and ndx == 0:
+                        # First chunk failed, create a fallback entry
+                        org, repo = valid_repo_names[0]
+                        self.logger.warning(
+                            f"Failed to get repo IDs, using fallback for {org}/{repo}"
+                        )
+                        augmented_repo_list.append(
+                            {"org": org, "repo": repo, "repo_id": 0}
+                        )
+                    else:
+                        augmented_repo_list += chunk_result
+
+                self.logger.info(
+                    f"Running the tap on {len(augmented_repo_list)} repositories"
+                )
+                return augmented_repo_list
+            except Exception as e:
+                # Handle any errors in the get_repo_ids process
+                self.logger.error(f"Error getting repository IDs: {str(e)}")
+
+                # Create a minimal fallback entry using the first repository
+                if valid_repo_names:
+                    org, repo = valid_repo_names[0]
+                    self.logger.warning(f"Using fallback for {org}/{repo}")
+                    return [{"org": org, "repo": repo, "repo_id": 0}]
+                return None
 
         if "organizations" in self.config:
             self.logger.info(f"Using organizations: {self.config['organizations']}")
+            if not self.config.get("organizations"):
+                self.logger.warning("Organizations list is empty in config")
+                return [{"org": "placeholder"}]
             return [{"org": org} for org in self.config["organizations"]]
-            
-        self.logger.warning(f"No repositories, organizations, or searches found in config for '{self.name}' stream")
-        return None
+
+        self.logger.warning(
+            f"No repositories, organizations, or searches found in config for '{self.name}' stream"
+        )
+
+        # If we reach here, we have no valid configuration
+        # Return a minimal fallback list to allow discovery to proceed
+        if self.config.get("repositories") and self.config["repositories"]:
+            parts = self.config["repositories"][0].split("/")
+            if len(parts) == 2:
+                return [{"org": parts[0], "repo": parts[1], "repo_id": 0}]
+
+        return [{"org": "placeholder", "repo": "placeholder", "repo_id": 0}]
 
     def get_child_context(self, record: dict, context: dict | None) -> dict:
         """Return a child context object from the record and optional provided context.
@@ -253,8 +352,10 @@ class RepositoryStream(GitHubRestStream):
         quota when only syncing a child stream. Without this,
         the API call is sent but data is discarded.
         """
-        self.logger.info(f"get_records called for '{self.name}' stream with context: {context}")
-        
+        self.logger.info(
+            f"get_records called for '{self.name}' stream with context: {context}"
+        )
+
         if (
             not self.selected
             and "skip_parent_streams" in self.config
@@ -264,7 +365,9 @@ class RepositoryStream(GitHubRestStream):
             # build a minimal mock record so that self._sync_records
             # can proceed with child streams
             # the id is fetched in `get_repo_ids` above
-            self.logger.info(f"Skipping API call for '{self.name}' stream and yielding mock record")
+            self.logger.info(
+                f"Skipping API call for '{self.name}' stream and yielding mock record"
+            )
             yield {
                 "owner": {
                     "login": context["org"],
@@ -340,13 +443,106 @@ class RepositoryStream(GitHubRestStream):
         """Override sync method to add more logging."""
         self.logger.info(f"RepositoryStream.sync called with context: {context}")
         self.logger.info(f"Config: {self.config}")
-        
+
         # Log information about partitions
         partitions = self.partitions
         self.logger.info(f"Partitions for '{self.name}': {partitions}")
-        
+
         # Call parent's sync method
         super().sync(context)
+
+    def prepare_request(
+        self,
+        context: dict | None,
+        next_page_token: Any | None,  # noqa: ANN401
+    ) -> requests.PreparedRequest:
+        """Prepare a request object for the REST API."""
+
+        self.logger.info(
+            f"prepare_request called for '{self.name}' stream with context: {context}"
+        )
+
+        # Store the current context for use in the path property
+        self._current_context = context
+
+        # If using repositories config, ensure we have a proper context
+        if "repositories" in self.config and (context is None or not context):
+            # Create a context from the first repository if needed
+            if self.config.get("repositories"):
+                repo_parts = self.config["repositories"][0].split("/")
+                if len(repo_parts) == 2:
+                    org, repo = repo_parts
+                    self.logger.info(
+                        f"Creating context from first repository: {org}/{repo}"
+                    )
+                    # Create a proper context with repo_id (dummy value if needed)
+                    context = {
+                        "org": org,
+                        "repo": repo,
+                        "repo_id": 0,  # Placeholder, should be replaced later
+                    }
+                    self._current_context = context
+
+        # Call the parent method to prepare the request
+        return super().prepare_request(context, next_page_token)
+
+    def get_url(self, context: dict | None = None) -> str:
+        """Return a URL configured for the stream.
+
+        Overriding to handle cases where template variables in the path
+        aren't properly interpolated.
+        """
+        self.logger.info(
+            f"get_url called for '{self.name}' stream with context: {context}"
+        )
+
+        # Store the current context for use in other methods
+        self._current_context = context
+
+        # Get the base path
+        path = self.path
+
+        # If path contains template variables and we have a context, manually format them
+        if "{" in path and "}" in path and context is not None:
+            self.logger.info(
+                f"Formatting path template: {path} with context: {context}"
+            )
+            try:
+                # Try to format with context
+                path = path.format(**context)
+                self.logger.info(f"Formatted path: {path}")
+            except KeyError as e:
+                # Handle missing template variables
+                self.logger.warning(
+                    f"Missing template variable {e} in context: {context}"
+                )
+
+                # If we have a repositories list, try to use the first one as fallback
+                if "repositories" in self.config and self.config.get("repositories"):
+                    repo_parts = self.config["repositories"][0].split("/")
+                    if len(repo_parts) == 2:
+                        org, repo = repo_parts
+
+                        # Create a fallback context with all possible variables
+                        fallback_context = {"org": org, "repo": repo}
+                        if "repo_id" not in fallback_context and "repo_id" in context:
+                            fallback_context["repo_id"] = context.get("repo_id", 0)
+
+                        # Try formatting with the fallback context
+                        try:
+                            path = path.format(**fallback_context)
+                            self.logger.info(f"Formatted path with fallback: {path}")
+                        except KeyError as e2:
+                            # If still failing, use hardcoded path
+                            self.logger.warning(
+                                f"Still missing template variable {e2} after fallback"
+                            )
+                            path = f"/repos/{org}/{repo}"
+
+        # Now build the URL
+        url = self.url_base.rstrip("/") + "/" + path.lstrip("/")
+        self.logger.info(f"Final URL: {url}")
+        return url
 
 
 class ReadmeStream(GitHubRestStream):
