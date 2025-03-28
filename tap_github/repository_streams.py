@@ -253,63 +253,64 @@ class RepositoryStream(GitHubRestStream):
                 # Return a minimal list with one dummy entry to allow discovery to proceed
                 return [{"org": "placeholder", "repo": "placeholder", "repo_id": 0}]
 
-            split_repo_names = [s.split("/") for s in self.config["repositories"]]
-
-            # Check for malformed repository names
-            for i, repo_parts in enumerate(split_repo_names):
-                if len(repo_parts) != 2:
-                    self.logger.warning(
-                        f"Malformed repository name: {self.config['repositories'][i]}"
-                    )
-
-            # Filter out malformed repository names
-            valid_repo_names = [parts for parts in split_repo_names if len(parts) == 2]
-
-            if not valid_repo_names:
-                self.logger.warning("No valid repository names found")
-                # Return a minimal list with one dummy entry
-                return [{"org": "placeholder", "repo": "placeholder", "repo_id": 0}]
-
+            # Convert repository strings to tuples of (org, repo)
             try:
-                augmented_repo_list = []
-                # chunk requests to the graphql endpoint to avoid timeouts and other
-                # obscure errors that the api doesn't say much about. The actual limit
-                # seems closer to 1000, use half that to stay safe.
-                chunk_size = 500
-                list_length = len(valid_repo_names)
-                self.logger.info(
-                    f"Filtering repository list of {list_length} repositories"
-                )
-                for ndx in range(0, list_length, chunk_size):
-                    chunk_result = self.get_repo_ids(
-                        valid_repo_names[ndx : ndx + chunk_size]
+                split_repo_names = []
+                for repo_str in self.config["repositories"]:
+                    parts = repo_str.split("/")
+                    if len(parts) != 2:
+                        self.logger.warning(f"Invalid repository format: {repo_str}")
+                        continue
+                    split_repo_names.append((parts[0], parts[1]))
+
+                if not split_repo_names:
+                    self.logger.warning("No valid repository names found")
+                    return [{"org": "placeholder", "repo": "placeholder", "repo_id": 0}]
+
+                try:
+                    augmented_repo_list = []
+                    # chunk requests to the graphql endpoint to avoid timeouts and other
+                    # obscure errors that the api doesn't say much about. The actual limit
+                    # seems closer to 1000, use half that to stay safe.
+                    chunk_size = 500
+                    list_length = len(split_repo_names)
+                    self.logger.info(
+                        f"Filtering repository list of {list_length} repositories"
                     )
-                    if not chunk_result and ndx == 0:
-                        # First chunk failed, create a fallback entry
-                        org, repo = valid_repo_names[0]
-                        self.logger.warning(
-                            f"Failed to get repo IDs, using fallback for {org}/{repo}"
+                    for ndx in range(0, list_length, chunk_size):
+                        chunk_result = self.get_repo_ids(
+                            split_repo_names[ndx : ndx + chunk_size]
                         )
-                        augmented_repo_list.append(
-                            {"org": org, "repo": repo, "repo_id": 0}
-                        )
-                    else:
-                        augmented_repo_list += chunk_result
+                        if not chunk_result and ndx == 0:
+                            # First chunk failed, create a fallback entry
+                            org, repo = split_repo_names[0]
+                            self.logger.warning(
+                                f"Failed to get repo IDs, using fallback for {org}/{repo}"
+                            )
+                            augmented_repo_list.append(
+                                {"org": org, "repo": repo, "repo_id": 0}
+                            )
+                        else:
+                            augmented_repo_list += chunk_result
 
-                self.logger.info(
-                    f"Running the tap on {len(augmented_repo_list)} repositories"
-                )
-                return augmented_repo_list
+                    self.logger.info(
+                        f"Running the tap on {len(augmented_repo_list)} repositories"
+                    )
+                    return augmented_repo_list
+                except Exception as e:
+                    # Handle any errors in the get_repo_ids process
+                    self.logger.error(f"Error getting repository IDs: {str(e)}")
+
+                    # Create a minimal fallback entry using the first repository
+                    if split_repo_names:
+                        org, repo = split_repo_names[0]
+                        self.logger.warning(f"Using fallback for {org}/{repo}")
+                        return [{"org": org, "repo": repo, "repo_id": 0}]
+                    return None
+
             except Exception as e:
-                # Handle any errors in the get_repo_ids process
-                self.logger.error(f"Error getting repository IDs: {str(e)}")
-
-                # Create a minimal fallback entry using the first repository
-                if valid_repo_names:
-                    org, repo = valid_repo_names[0]
-                    self.logger.warning(f"Using fallback for {org}/{repo}")
-                    return [{"org": org, "repo": repo, "repo_id": 0}]
-                return None
+                self.logger.error(f"Error processing repository list: {str(e)}")
+                return [{"org": "placeholder", "repo": "placeholder", "repo_id": 0}]
 
         if "organizations" in self.config:
             self.logger.info(f"Using organizations: {self.config['organizations']}")
