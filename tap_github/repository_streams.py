@@ -34,6 +34,18 @@ class RepositoryStream(GitHubRestStream):
     # e.g. when the description or the primary language of the repository is updated.
     replication_key = "updated_at"
 
+    def _sync_children(self, context: dict | None) -> None:
+        """Override _sync_children to check stream selection for child streams."""
+        for child_stream in self.child_streams:
+            # Check if stream is disabled in config
+            if not self.config.get("stream_selection", {}).get(child_stream.name, {}).get("selected", True):
+                self.logger.info(f"Skipping child stream {child_stream.name} as it is disabled in configuration.")
+                continue
+            
+            child_context = self.get_child_context(self.stream_maps[0], context)
+            if child_context:
+                child_stream.sync(context=child_context)
+
     def get_url_params(
         self,
         context: dict | None,
@@ -2571,6 +2583,14 @@ class DependentsStream(GitHubRestStream):
     parent_stream_type = RepositoryStream
     ignore_parent_replication_key = True
     state_partitioning_keys: ClassVar[list[str]] = ["repo_id"]
+
+    def sync(self, context: dict | None = None) -> None:
+        """Override sync to check if stream is selected."""
+        # Check if stream is disabled in config
+        if not self.config.get("stream_selection", {}).get(self.name, {}).get("selected", True):
+            self.logger.info(f"Skipping {self.name} stream as it is disabled in configuration.")
+            return
+        super().sync(context)
 
     @property
     def url_base(self) -> str:
