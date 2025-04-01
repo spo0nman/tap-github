@@ -42,9 +42,19 @@ class RepositoryStream(GitHubRestStream):
                 self.logger.info(f"Skipping child stream {child_stream.name} as it is disabled in configuration.")
                 continue
             
-            child_context = self.get_child_context(self.stream_maps[0], context)
-            if child_context:
-                child_stream.sync(context=child_context)
+            # Get the child context directly from the parent context
+            if context:
+                child_context = {
+                    "org": context.get("org"),
+                    "repo": context.get("repo"),
+                    "repo_id": context.get("repo_id")
+                }
+                if child_context["org"] and child_context["repo"] and child_context["repo_id"]:
+                    child_stream.sync(context=child_context)
+                else:
+                    self.logger.warning(f"Skipping child stream {child_stream.name} due to incomplete context: {child_context}")
+            else:
+                self.logger.warning(f"Skipping child stream {child_stream.name} due to missing context")
 
     def get_url_params(
         self,
